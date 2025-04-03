@@ -7,6 +7,8 @@ A graphical user interface for the turdus_m3rula iOS device downgrade/restoratio
 turdus_m3rula_GUI provides an easy-to-use interface for restoring and downgrading iOS devices without requiring
 command-line knowledge. The application guides users through the complete process with clear instructions and status
 updates.
+<img width="1236" alt="WechatIMG12139" src="https://github.com/user-attachments/assets/4f10e128-b5f3-4641-8df0-6cebf7913e21" />
+
 
 ## Features
 
