@@ -1,23 +1,20 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os
 import glob
-import time
-import subprocess
-import threading
+import os
 import signal
+import subprocess
 import sys
-from datetime import datetime
-import queue
+
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt6.QtGui import QColor, QTextCursor
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QPushButton, QLabel, QProgressBar, QTextEdit,
     QFrame, QFileDialog, QMessageBox, QGroupBox, QGridLayout,
-    QLineEdit, QSplitter, QToolButton, QSpacerItem, QSizePolicy
+    QLineEdit, QSplitter, QToolButton
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
-from PyQt6.QtGui import QColor, QTextCursor, QIcon, QFont, QPixmap
 
 # Color constants - Using deeper colors for better visibility
 COLOR_GREEN = "#00B300"  # Darker green
@@ -1789,17 +1786,19 @@ class TurdusGUI(QMainWindow):
 
     def restore_device(self):
         """Restore device"""
-        if not self.pteblock_path:
-            QMessageBox.critical(self, "Error", "PTE block not found. Please extract the PTE block first.")
+        # Check both the internal path and the widget path
+        custom_pteblock_path = self.pteblock_path_widget.get_path()
+
+        if not self.pteblock_path and not custom_pteblock_path:
+            QMessageBox.critical(self, "Error", "PTE block not found. Please extract the PTE block first or select a PTE block file manually.")
             return
 
         self.current_operation_button = self.btn_restore_device
         self.update_button_status(self.btn_restore_device, "In Progress", COLOR_BLUE)
         self.log_message("\n===== Restoring device =====", "BLUE")
 
-        # Get custom PTE block path if user changed it
-        custom_pteblock_path = self.pteblock_path_widget.get_path()
-        if custom_pteblock_path and custom_pteblock_path != self.pteblock_path:
+        # Use the manually selected path if available, otherwise use the internal path
+        if custom_pteblock_path:
             self.pteblock_path = custom_pteblock_path
             self.log_message(f"Using custom PTE block path: {custom_pteblock_path}", "BLUE")
 
@@ -1898,17 +1897,19 @@ class TurdusGUI(QMainWindow):
 
     def boot_device(self):
         """Boot device"""
-        if not self.pteblock_path:
-            QMessageBox.critical(self, "Error", "PTE block not found. Please restore the device first.")
+        # Check both the internal path and the widget path
+        custom_pteblock_path = self.pteblock_path_widget.get_path()
+
+        if not self.pteblock_path and not custom_pteblock_path:
+            QMessageBox.critical(self, "Error", "PTE block not found. Please restore the device first or select a PTE block file manually.")
             return
 
         self.current_operation_button = self.btn_boot_device
         self.update_button_status(self.btn_boot_device, "In Progress", COLOR_BLUE)
         self.log_message("\n===== Booting device =====", "BLUE")
 
-        # Get custom PTE block path if user changed it
-        custom_pteblock_path = self.pteblock_path_widget.get_path()
-        if custom_pteblock_path and custom_pteblock_path != self.pteblock_path:
+        # Use the manually selected path if available, otherwise use the internal path
+        if custom_pteblock_path:
             self.pteblock_path = custom_pteblock_path
             self.log_message(f"Using custom PTE block path: {custom_pteblock_path}", "BLUE")
 
