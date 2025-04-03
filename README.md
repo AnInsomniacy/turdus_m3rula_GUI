@@ -1,4 +1,4 @@
-# turdus_m3rula_GUI(Currently for tethered downgrade)
+# turdus_m3rula_GUI (Currently only for tethered downgrade)
 
 A graphical user interface for the turdus_m3rula iOS device downgrade/restoration tool.
 
