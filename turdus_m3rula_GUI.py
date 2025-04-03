@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import shutil
+import time
 
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer
 from PyQt6.QtGui import QColor, QTextCursor
@@ -14,7 +15,7 @@ from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QComboBox, QPushButton, QLabel, QProgressBar, QTextEdit,
     QFrame, QFileDialog, QMessageBox, QGroupBox, QGridLayout,
-    QLineEdit, QSplitter, QToolButton
+    QLineEdit, QSplitter, QToolButton, QRadioButton, QButtonGroup, QInputDialog
 )
 
 # Color constants - Using deeper colors for better visibility
@@ -27,6 +28,8 @@ BG_DARK = "#2E2E2E"  # Dark background
 BG_MEDIUM = "#3D3D3D"  # Medium background
 TEXT_LIGHT = "#E0E0E0"  # Light text
 HIGHLIGHT_COLOR = "#FF6600"  # Highlight color for next steps
+BUTTON_HIGHLIGHT_BORDER = "#FFB700"  # Border color for highlighted buttons
+BUTTON_HIGHLIGHT_GLOW = "0 0 8px #FF8C00"  # Glow effect for highlighted buttons
 
 # Paths
 WORK_DIR = "./downgrade_work"
@@ -43,22 +46,27 @@ class CommandThread(QThread):
         self.command = command
         self.timeout = timeout
         self.check_output = check_output
-        self.retry_with_ED = retry_with_ED
-        self.max_retries = max_retries
         self.process = None
         self.terminated = False
         self.dfu_timeout = dfu_timeout
         self.is_dfu_command = "turdusra1n -ED" in command
+        self.last_output_time = 0
+        self.dfu_auto_retry_count = 0
+        self.max_dfu_retries = 3
 
     def run(self):
-        retry_count = 0
         output_lines = []
         success = False
         output = None
 
-        while retry_count <= self.max_retries and not success and not self.terminated:
-            if retry_count > 0:
-                self.logOutput.emit(f"Retry #{retry_count}...", "YELLOW")
+        # turdusra1n -ED 命令特殊处理，允许自动重试
+        while (
+                self.is_dfu_command and self.dfu_auto_retry_count < self.max_dfu_retries and not success and not self.terminated) or (
+                not self.is_dfu_command and not self.terminated):
+            if self.is_dfu_command and self.dfu_auto_retry_count > 0:
+                self.logOutput.emit(
+                    f"自动重试 turdusra1n -ED (尝试 {self.dfu_auto_retry_count + 1}/{self.max_dfu_retries})...",
+                    "YELLOW")
 
             self.logOutput.emit(f"Executing command: {self.command}", "GREEN")
 
@@ -72,13 +80,14 @@ class CommandThread(QThread):
             )
 
             output_lines = []
+            self.last_output_time = time.time()
 
-            # Special handling for DFU commands with auto-retry
+            # 创建DFU命令监控定时器
             if self.is_dfu_command:
                 dfu_timer = QTimer()
-                dfu_timer.setSingleShot(True)
-                dfu_timer.timeout.connect(self.handle_dfu_timeout)
-                dfu_timer.start(self.dfu_timeout * 1000)  # Convert seconds to milliseconds
+                dfu_timer.setSingleShot(False)  # 连续运行
+                dfu_timer.timeout.connect(self.check_dfu_output)
+                dfu_timer.start(1000)  # 每秒检查一次输出状态
 
             # Read output
             for line in iter(self.process.stdout.readline, ""):
@@ -88,9 +97,8 @@ class CommandThread(QThread):
                 if self.check_output:
                     output_lines.append(line)
 
-                # If we're getting output and this is a DFU command, stop the timer
-                if self.is_dfu_command and dfu_timer.isActive():
-                    dfu_timer.stop()
+                # 更新最后输出时间
+                self.last_output_time = time.time()
 
             try:
                 if not self.terminated:
@@ -104,86 +112,61 @@ class CommandThread(QThread):
                 self.process.kill()
                 self.process.wait()
 
-            if success:
-                if self.check_output:
-                    output = "".join(output_lines)
+            # 停止DFU监控定时器
+            if self.is_dfu_command and 'dfu_timer' in locals() and dfu_timer.isActive():
+                dfu_timer.stop()
+
+            # 如果不是DFU命令或者DFU命令成功，跳出循环
+            if not self.is_dfu_command or success:
                 break
 
-            # If retry is needed and the command failed
-            if self.retry_with_ED and retry_count < self.max_retries and not self.terminated:
-                self.logOutput.emit(f"Command failed, attempting to restart with ./bin/turdusra1n -ED...", "YELLOW")
-                # Run turdusra1n -ED
-                ed_success = self._run_turdusra1n_ED()
-                if not ed_success:
-                    self.logOutput.emit("turdusra1n -ED failed, cannot continue retrying", "RED")
-                    break
+            # DFU命令失败，增加重试计数
+            self.dfu_auto_retry_count += 1
 
-            retry_count += 1
+            # 如果已经达到最大重试次数，跳出循环
+            if self.dfu_auto_retry_count >= self.max_dfu_retries:
+                self.logOutput.emit(f"turdusra1n -ED 命令在 {self.max_dfu_retries} 次尝试后仍然失败", "RED")
+                break
+
+        if success and self.check_output:
+            output = "".join(output_lines)
 
         self.commandComplete.emit(success, output if self.check_output else "")
 
-    def handle_dfu_timeout(self):
-        """Handle DFU command timeout - emits signal to trigger auto-retry"""
-        if not self.terminated and self.process:
-            self.logOutput.emit("DFU command not responding, will auto-retry...", "YELLOW")
-            self.timedOut.emit()
-            self.terminate()
+    def check_dfu_output(self):
+        """检查DFU命令是否有一段时间没有输出，如果是则尝试重启"""
+        if not self.is_dfu_command or self.terminated or not self.process:
+            return
 
-    def _run_turdusra1n_ED(self):
-        """Run turdusra1n -ED command synchronously"""
-        max_attempts = 3
-        attempt = 1
+        current_time = time.time()
+        if current_time - self.last_output_time > 5:  # 5秒无输出
+            self.logOutput.emit("turdusra1n -ED 命令已经 5 秒没有输出，正在自动重启...", "YELLOW")
 
-        while attempt <= max_attempts and not self.terminated:
-            self.logOutput.emit(f"Attempt {attempt}/{max_attempts}: Running ./bin/turdusra1n -ED", "BLUE")
+            # 终止当前进程
+            self.terminate_process()
 
-            ed_process = subprocess.Popen(
-                "./bin/turdusra1n -ED",
-                shell=True,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1
-            )
+            # 在run中会自动启动新的进程
 
-            self.process = ed_process
-
-            # Read output
-            for line in iter(ed_process.stdout.readline, ""):
-                if self.terminated:
-                    break
-                self.logOutput.emit(line, None)
-
-            try:
-                if not self.terminated:
-                    ed_process.wait(timeout=5)
-                    if ed_process.returncode == 0:
-                        return True
-            except subprocess.TimeoutExpired:
-                self.logOutput.emit("turdusra1n -ED command timed out", "RED")
-                ed_process.kill()
-                ed_process.wait()
-
-            if self.terminated:
-                return False
-
-            self.logOutput.emit(f"Attempt {attempt} failed, retrying...", "YELLOW")
-            attempt += 1
-
-        self.logOutput.emit("Failed after multiple attempts", "RED")
-        return False
-
-    def terminate(self):
-        """Terminate command execution"""
-        self.terminated = True
+    def terminate_process(self):
+        """终止当前进程但不终止线程"""
         if self.process:
             try:
                 if sys.platform == "win32":
                     subprocess.run(["taskkill", "/F", "/T", "/PID", str(self.process.pid)])
                 else:
                     os.killpg(os.getpgid(self.process.pid), signal.SIGTERM)
+                self.process.wait(timeout=1)
             except Exception as e:
                 print(f"Error terminating process: {str(e)}")
+                try:
+                    self.process.kill()
+                except:
+                    pass
+
+    def terminate(self):
+        """Terminate command execution"""
+        self.terminated = True
+        self.terminate_process()
         super().terminate()
 
 
@@ -302,11 +285,14 @@ class TurdusGUI(QMainWindow):
 
         # Initialize variables
         self.firmware_path = None
+        self.shsh_path = None
         self.shcblock_path = None
         self.pteblock_path = None
         self.command_thread = None
         self.next_step_button = None  # Keep track of the next button to highlight
         self.restart_from_phase = None  # Track which phase to restart from after a failure
+        self.workflow_type = "a9_tether"  # 默认工作流类型
+        self.generator = None  # 存储nonce generator
 
         # Set dark application style
         self.setStyleSheet(f"""
@@ -408,13 +394,15 @@ class TurdusGUI(QMainWindow):
     def create_firmware_selector(self):
         """Create firmware selector area"""
         firmware_frame = QFrame()
-        firmware_layout = QHBoxLayout(firmware_frame)
+        firmware_layout = QVBoxLayout(firmware_frame)
         firmware_layout.setContentsMargins(5, 5, 5, 5)
         firmware_layout.setSpacing(5)
 
+        # Firmware selector
+        firmware_row = QHBoxLayout()
         firmware_label = QLabel("Firmware:")
         firmware_label.setStyleSheet("font-weight: bold;")
-        firmware_layout.addWidget(firmware_label)
+        firmware_row.addWidget(firmware_label)
 
         self.firmware_path_label = QLineEdit()
         self.firmware_path_label.setReadOnly(True)
@@ -427,7 +415,7 @@ class TurdusGUI(QMainWindow):
                 padding: 4px;
             }}
         """)
-        firmware_layout.addWidget(self.firmware_path_label, 1)
+        firmware_row.addWidget(self.firmware_path_label, 1)
 
         browse_button = QPushButton("Browse...")
         browse_button.clicked.connect(self.browse_firmware)
@@ -444,10 +432,111 @@ class TurdusGUI(QMainWindow):
                 background-color: #4D4D4D;
             }
         """)
-        firmware_layout.addWidget(browse_button)
+        firmware_row.addWidget(browse_button)
+        firmware_layout.addLayout(firmware_row)
+
+        # SHSH Blob selector
+        shsh_row = QHBoxLayout()
+        shsh_label = QLabel("SHSH Blob:")
+        shsh_label.setStyleSheet("font-weight: bold;")
+        shsh_row.addWidget(shsh_label)
+
+        self.shsh_path_label = QLineEdit()
+        self.shsh_path_label.setReadOnly(True)
+        self.shsh_path_label.setStyleSheet(f"""
+            QLineEdit {{
+                background-color: {BG_MEDIUM};
+                color: {TEXT_LIGHT};
+                border: 1px solid #505050;
+                border-radius: 3px;
+                padding: 4px;
+            }}
+        """)
+        shsh_row.addWidget(self.shsh_path_label, 1)
+
+        shsh_browse_button = QPushButton("Browse...")
+        shsh_browse_button.clicked.connect(self.browse_shsh)
+        shsh_browse_button.setFixedWidth(100)
+        shsh_browse_button.setStyleSheet("""
+            QPushButton {
+                background-color: #3D3D3D;
+                color: #E0E0E0;
+                border: 1px solid #505050;
+                border-radius: 3px;
+                padding: 4px;
+            }
+            QPushButton:hover {
+                background-color: #4D4D4D;
+            }
+        """)
+        shsh_row.addWidget(shsh_browse_button)
+        firmware_layout.addLayout(shsh_row)
 
         # Add to left panel
         self.left_layout.addWidget(firmware_frame)
+
+    def browse_shsh(self):
+        """浏览选择SHSH文件"""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self, "Select SHSH Blob File", "", "SHSH Files (*.shsh;*.shsh2);;All Files (*.*)"
+        )
+
+        if file_path:
+            self.shsh_path = file_path
+            self.shsh_path_label.setText(file_path)
+            self.log_message(f"Selected SHSH blob: {os.path.basename(file_path)}", "GREEN")
+
+    def update_workflow(self):
+        """根据CPU类型和降级方式更新工作流程"""
+        cpu_type = "A9" if self.radio_a9.isChecked() else "A10"
+        downgrade_type = "tethered" if self.radio_tether.isChecked() else "untethered"
+
+        workflow_msg = f"Workflow updated: {cpu_type} + {downgrade_type} downgrade"
+        self.log_message(f"\n===== {workflow_msg} =====", "BLUE")
+
+        # 根据不同的组合更新界面提示
+        if cpu_type == "A9" and downgrade_type == "tethered":
+            self.workflow_type = "a9_tether"
+            self.log_message("A9+tethered降级流程: 将引导您提取SHC、PTE block并进行tethered降级", "GREEN")
+            self.log_message("此降级方式需要在每次开机时连接电脑进行引导", "YELLOW")
+        elif cpu_type == "A10" and downgrade_type == "tethered":
+            self.workflow_type = "a10_tether"
+            self.log_message("A10+tethered降级流程: 将直接进行固件还原和引导操作", "GREEN")
+            self.log_message("此降级方式需要在每次开机时连接电脑进行引导", "YELLOW")
+        elif cpu_type == "A9" and downgrade_type == "untethered":
+            self.workflow_type = "a9_untether"
+            self.log_message("A9+untethered降级流程: 将使用SHSH blob和SHC block进行untethered降级", "GREEN")
+            self.log_message("请确保您已经选择了有效的SHSH blob文件", "YELLOW")
+        else:  # A10 + untethered
+            self.workflow_type = "a10_untether"
+            self.log_message("A10+untethered降级流程: 将使用SHSH blob进行untethered降级", "GREEN")
+            self.log_message("请确保您已经选择了有效的SHSH blob文件", "YELLOW")
+
+        # 更新SHSH文件选择器的可见性
+        # untethered 模式需要SHSH文件
+        self.shsh_path_label.setEnabled(downgrade_type == "untethered")
+
+        if downgrade_type == "untethered" and not self.shsh_path:
+            self.log_message("请先选择SHSH blob文件再继续操作", "RED")
+
+        # 重置未完成步骤的按钮状态以便重新高亮
+        buttons = [
+            self.btn_set_permissions,
+            self.btn_enter_pwnedDFU,
+            self.btn_get_shcblock,
+            self.btn_enter_pwnedDFU2,
+            self.btn_get_pteblock,
+            self.btn_enter_pwnedDFU3,
+            self.btn_restore_device,
+            self.btn_boot_device
+        ]
+
+        for button in buttons:
+            if button.status != "Completed" and button.status != "Failed":
+                button.status = "Ready"
+
+        # 更新按钮颜色高亮
+        self.update_next_step_highlight()
 
     def create_file_path_widgets(self):
         """Create widgets for displaying and selecting file paths"""
@@ -476,7 +565,7 @@ class TurdusGUI(QMainWindow):
         operations_layout.setContentsMargins(0, 0, 0, 0)
 
         # PHASE 1: Enter Pwned DFU Mode
-        self.phase1_group = QGroupBox("Phase 1: Enter Pwned DFU Mode")
+        self.phase1_group = QGroupBox("Phase 1: Set Tool Permissions")
         self.phase1_group.setStyleSheet("""
             QGroupBox {
                 font-size: 14px;
@@ -520,33 +609,6 @@ class TurdusGUI(QMainWindow):
         self.btn_set_permissions.retry_button = retry_btn1
         p1_desc_layout.addWidget(retry_btn1, 0, 2)
 
-        # Step 2 description and button
-        step2_desc = QLabel("Put your device in DFU mode and exploit it with checkm8")
-        step2_desc.setWordWrap(True)
-        p1_desc_layout.addWidget(step2_desc, 1, 0)
-
-        self.btn_enter_pwnedDFU = OperationButton("2. Enter Pwned DFU Mode")
-        self.btn_enter_pwnedDFU.clicked.connect(self.enter_pwned_dfu)
-        p1_desc_layout.addWidget(self.btn_enter_pwnedDFU, 1, 1)
-
-        retry_btn2 = QPushButton("Retry")
-        retry_btn2.clicked.connect(self.enter_pwned_dfu)
-        retry_btn2.setFixedWidth(60)
-        retry_btn2.setStyleSheet("""
-            QPushButton {
-                background-color: #FFA500;
-                color: black;
-                border-radius: 3px;
-                padding: 4px;
-            }
-            QPushButton:hover {
-                background-color: #FFB52E;
-            }
-        """)
-        retry_btn2.setVisible(False)
-        self.btn_enter_pwnedDFU.retry_button = retry_btn2
-        p1_desc_layout.addWidget(retry_btn2, 1, 2)
-
         phase1_layout.addLayout(p1_desc_layout)
         operations_layout.addWidget(self.phase1_group)
 
@@ -568,17 +630,44 @@ class TurdusGUI(QMainWindow):
         p2_desc_layout.setColumnStretch(1, 0)  # Button column fixed
         p2_desc_layout.setColumnStretch(2, 0)  # Retry button column fixed
 
+        # Step 2 description and button (moved from Phase 1)
+        step2_desc = QLabel("Put your device in DFU mode and exploit it with checkm8")
+        step2_desc.setWordWrap(True)
+        p2_desc_layout.addWidget(step2_desc, 0, 0)
+
+        self.btn_enter_pwnedDFU = OperationButton("2. Enter Pwned DFU Mode")
+        self.btn_enter_pwnedDFU.clicked.connect(self.enter_pwned_dfu)
+        p2_desc_layout.addWidget(self.btn_enter_pwnedDFU, 0, 1)
+
+        retry_btn2 = QPushButton("Retry")
+        retry_btn2.clicked.connect(self.enter_pwned_dfu)
+        retry_btn2.setFixedWidth(60)
+        retry_btn2.setStyleSheet("""
+            QPushButton {
+                background-color: #FFA500;
+                color: black;
+                border-radius: 3px;
+                padding: 4px;
+            }
+            QPushButton:hover {
+                background-color: #FFB52E;
+            }
+        """)
+        retry_btn2.setVisible(False)
+        self.btn_enter_pwnedDFU.retry_button = retry_btn2
+        p2_desc_layout.addWidget(retry_btn2, 0, 2)
+
         # Step 3 description and button
         step3_desc = QLabel("Extract SHC from device")
         step3_desc.setWordWrap(True)
-        p2_desc_layout.addWidget(step3_desc, 0, 0)
+        p2_desc_layout.addWidget(step3_desc, 1, 0)
 
         self.btn_get_shcblock = OperationButton("3. Extract SHC Block")
         self.btn_get_shcblock.clicked.connect(self.extract_shcblock)
-        p2_desc_layout.addWidget(self.btn_get_shcblock, 0, 1)
+        p2_desc_layout.addWidget(self.btn_get_shcblock, 1, 1)
 
         retry_btn3 = QPushButton("Retry")
-        retry_btn3.clicked.connect(self.enter_pwned_dfu)  # Restart from Enter Pwned DFU
+        retry_btn3.clicked.connect(self.extract_shcblock)  # 直接重试，不再自动进入DFU
         retry_btn3.setFixedWidth(60)
         retry_btn3.setStyleSheet("""
             QPushButton {
@@ -593,7 +682,7 @@ class TurdusGUI(QMainWindow):
         """)
         retry_btn3.setVisible(False)
         self.btn_get_shcblock.retry_button = retry_btn3
-        p2_desc_layout.addWidget(retry_btn3, 0, 2)
+        p2_desc_layout.addWidget(retry_btn3, 1, 2)
 
         phase2_layout.addLayout(p2_desc_layout)
         operations_layout.addWidget(self.phase2_group)
@@ -868,6 +957,96 @@ class TurdusGUI(QMainWindow):
         log_layout.setContentsMargins(5, 5, 5, 5)
         log_layout.setSpacing(5)
 
+        # 设备类型和降级方式选择
+        options_frame = QFrame()
+        options_layout = QHBoxLayout(options_frame)
+        options_layout.setContentsMargins(5, 5, 5, 5)
+        options_layout.setSpacing(8)
+
+        # CPU 类型选择
+        cpu_group_box = QGroupBox("CPU Type")
+        cpu_group_box.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #505050;
+                border-radius: 3px;
+                margin-top: 6px;
+                padding: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 3px;
+            }
+        """)
+        cpu_layout = QHBoxLayout(cpu_group_box)
+
+        self.cpu_type_group = QButtonGroup(cpu_group_box)
+        self.radio_a9 = QRadioButton("A9(X)")
+        self.radio_a10 = QRadioButton("A10(X)")
+        self.radio_a9.setChecked(True)  # 默认选择A9
+
+        radio_style = """
+            QRadioButton {
+                color: #E0E0E0;
+                padding: 4px;
+            }
+            QRadioButton::indicator {
+                width: 15px;
+                height: 15px;
+            }
+        """
+        self.radio_a9.setStyleSheet(radio_style)
+        self.radio_a10.setStyleSheet(radio_style)
+
+        self.cpu_type_group.addButton(self.radio_a9, 1)
+        self.cpu_type_group.addButton(self.radio_a10, 2)
+
+        cpu_layout.addWidget(self.radio_a9)
+        cpu_layout.addWidget(self.radio_a10)
+
+        # 降级方式选择
+        downgrade_group_box = QGroupBox("Downgrade Type")
+        downgrade_group_box.setStyleSheet("""
+            QGroupBox {
+                font-weight: bold;
+                border: 1px solid #505050;
+                border-radius: 3px;
+                margin-top: 6px;
+                padding: 10px;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 3px;
+            }
+        """)
+        downgrade_layout = QHBoxLayout(downgrade_group_box)
+
+        self.downgrade_type_group = QButtonGroup(downgrade_group_box)
+        self.radio_tether = QRadioButton("Tethered")
+        self.radio_untether = QRadioButton("Untethered")
+        self.radio_tether.setChecked(True)  # 默认选择Tethered
+
+        self.radio_tether.setStyleSheet(radio_style)
+        self.radio_untether.setStyleSheet(radio_style)
+
+        self.downgrade_type_group.addButton(self.radio_tether, 1)
+        self.downgrade_type_group.addButton(self.radio_untether, 2)
+
+        downgrade_layout.addWidget(self.radio_tether)
+        downgrade_layout.addWidget(self.radio_untether)
+
+        # 将选择框添加到选项布局中
+        options_layout.addWidget(cpu_group_box)
+        options_layout.addWidget(downgrade_group_box)
+
+        # 连接选择变化信号
+        self.cpu_type_group.buttonClicked.connect(self.update_workflow)
+        self.downgrade_type_group.buttonClicked.connect(self.update_workflow)
+
+        log_layout.addWidget(options_frame)
+
         # Log header with title and clear button
         log_header = QFrame()
         header_layout = QHBoxLayout(log_header)
@@ -998,7 +1177,7 @@ class TurdusGUI(QMainWindow):
 
     def find_latest_block(self, block_type):
         """Find the latest block file"""
-        block_dirs = [os.path.join(WORK_DIR, "block"), os.path.join(WORK_DIR, "blocks")]
+        block_dirs = [os.path.join(WORK_DIR, "block"), os.path.join(WORK_DIR, "blocks"), "./block", "./blocks"]
         all_block_files = []
 
         for blocks_dir in block_dirs:
@@ -1008,7 +1187,7 @@ class TurdusGUI(QMainWindow):
                 all_block_files.extend(block_files)
 
         if not all_block_files:
-            self.log_message(f"No {block_type} files found in working directories!", "RED")
+            self.log_message(f"No {block_type} files found in any directory.", "YELLOW")
             return None
 
         # Sort by modification time
@@ -1024,7 +1203,7 @@ class TurdusGUI(QMainWindow):
 
         # Create and start thread
         self.command_thread = CommandThread(
-            command, timeout, check_output, retry_with_ED, max_retries
+            command, timeout, check_output, retry_with_ED=False, max_retries=1  # 禁用自动重试
         )
 
         # Connect signals
@@ -1135,6 +1314,7 @@ class TurdusGUI(QMainWindow):
             self.btn_boot_device
         ]
 
+        # 清除所有按钮的高亮
         for button in buttons:
             if button.status != "Completed" and button.status != "Failed":
                 button.setStyleSheet("""
@@ -1160,37 +1340,111 @@ class TurdusGUI(QMainWindow):
                     }
                 """)
 
-        # Find next step to highlight based on current progress
+        # Find next step to highlight based on current progress and workflow type
         next_step = None
+        next_step_description = ""
+
+        # 检查固件是否已选择
         if not self.firmware_path:
-            # No firmware, user needs to select one
+            self.log_message("请首先选择固件文件", "YELLOW")
             return
 
-        if self.btn_set_permissions.status != "Completed":
-            next_step = self.btn_set_permissions
-        elif self.btn_enter_pwnedDFU.status != "Completed":
-            next_step = self.btn_enter_pwnedDFU
-        elif self.btn_get_shcblock.status != "Completed":
-            next_step = self.btn_get_shcblock
-        elif not self.shcblock_path:
-            # Suggest using the file browser to select an SHC block
-            next_step = self.btn_enter_pwnedDFU2  # Still proceed to next step
-        elif self.btn_enter_pwnedDFU2.status != "Completed":
-            next_step = self.btn_enter_pwnedDFU2
-        elif self.btn_get_pteblock.status != "Completed":
-            next_step = self.btn_get_pteblock
-        elif not self.pteblock_path:
-            # Suggest using the file browser to select a PTE block
-            next_step = self.btn_enter_pwnedDFU3  # Still proceed to next step
-        elif self.btn_enter_pwnedDFU3.status != "Completed":
-            next_step = self.btn_enter_pwnedDFU3
-        elif self.btn_restore_device.status != "Completed":
-            next_step = self.btn_restore_device
-        elif self.btn_boot_device.status != "Completed":
-            next_step = self.btn_boot_device
+        # 检查untethered模式是否已选择SHSH文件
+        if ("untether" in self.workflow_type) and not self.shsh_path:
+            self.log_message("Untethered降级模式需要选择SHSH blob文件", "YELLOW")
+            return
 
-        # Highlight next step - all buttons are always clickable
+        # 根据不同工作流程确定下一步
+        if self.workflow_type == "a9_tether":
+            # A9 Tethered 工作流程
+            if self.btn_set_permissions.status != "Completed":
+                next_step = self.btn_set_permissions
+                next_step_description = "A9+tethered降级: 首先设置工具权限"
+            elif self.btn_enter_pwnedDFU.status != "Completed":
+                next_step = self.btn_enter_pwnedDFU
+                next_step_description = "A9+tethered降级: 进入Pwned DFU模式"
+            elif self.btn_get_shcblock.status != "Completed":
+                next_step = self.btn_get_shcblock
+                next_step_description = "A9+tethered降级: 提取SHC Block"
+            elif not self.shcblock_path and not self.shcblock_path_widget.get_path():
+                # 提示选择 SHC block
+                self.log_message("A9+tethered降级: 请选择一个SHC block文件以继续", "YELLOW")
+                return
+            elif self.btn_enter_pwnedDFU2.status != "Completed":
+                next_step = self.btn_enter_pwnedDFU2
+                next_step_description = "A9+tethered降级: 重新进入Pwned DFU模式提取PTE Block"
+            elif self.btn_get_pteblock.status != "Completed":
+                next_step = self.btn_get_pteblock
+                next_step_description = "A9+tethered降级: 提取PTE Block"
+            elif not self.pteblock_path and not self.pteblock_path_widget.get_path():
+                # 提示选择 PTE block
+                self.log_message("A9+tethered降级: 请选择一个PTE block文件以继续", "YELLOW")
+                return
+            elif self.btn_enter_pwnedDFU3.status != "Completed":
+                next_step = self.btn_enter_pwnedDFU3
+                next_step_description = "A9+tethered降级: 重新进入Pwned DFU模式准备还原设备"
+            elif self.btn_restore_device.status != "Completed":
+                next_step = self.btn_restore_device
+                next_step_description = "A9+tethered降级: 还原设备到选定的固件"
+            elif self.btn_boot_device.status != "Completed":
+                next_step = self.btn_boot_device
+                next_step_description = "A9+tethered降级: 引导设备启动"
+
+        elif self.workflow_type == "a10_tether":
+            # A10 Tethered 工作流程
+            if self.btn_set_permissions.status != "Completed":
+                next_step = self.btn_set_permissions
+                next_step_description = "A10+tethered降级: 首先设置工具权限"
+            elif self.btn_enter_pwnedDFU.status != "Completed":
+                next_step = self.btn_enter_pwnedDFU
+                next_step_description = "A10+tethered降级: 进入Pwned DFU模式"
+            elif self.btn_restore_device.status != "Completed":
+                next_step = self.btn_restore_device
+                next_step_description = "A10+tethered降级: 还原设备到选定的固件"
+            elif self.btn_enter_pwnedDFU2.status != "Completed":
+                next_step = self.btn_enter_pwnedDFU2
+                next_step_description = "A10+tethered降级: 重新进入Pwned DFU模式准备引导"
+            elif self.btn_boot_device.status != "Completed":
+                next_step = self.btn_boot_device
+                next_step_description = "A10+tethered降级: 引导设备启动"
+
+        elif self.workflow_type == "a9_untether":
+            # A9 Untethered 工作流程
+            if self.btn_set_permissions.status != "Completed":
+                next_step = self.btn_set_permissions
+                next_step_description = "A9+untethered降级: 首先设置工具权限"
+            elif self.btn_enter_pwnedDFU.status != "Completed":
+                next_step = self.btn_enter_pwnedDFU
+                next_step_description = "A9+untethered降级: 进入Pwned DFU模式并输入Generator"
+            elif self.btn_get_shcblock.status != "Completed":
+                next_step = self.btn_get_shcblock
+                next_step_description = "A9+untethered降级: 提取SHC Block"
+            elif not self.shcblock_path and not self.shcblock_path_widget.get_path():
+                # 提示选择 SHC block
+                self.log_message("A9+untethered降级: 请选择一个SHC block文件以继续", "YELLOW")
+                return
+            elif self.btn_enter_pwnedDFU2.status != "Completed":
+                next_step = self.btn_enter_pwnedDFU2
+                next_step_description = "A9+untethered降级: 重新进入Pwned DFU模式准备还原"
+            elif self.btn_restore_device.status != "Completed":
+                next_step = self.btn_restore_device
+                next_step_description = "A9+untethered降级: 使用SHSH和SHC还原设备"
+
+        else:  # a10_untether
+            # A10 Untethered 工作流程
+            if self.btn_set_permissions.status != "Completed":
+                next_step = self.btn_set_permissions
+                next_step_description = "A10+untethered降级: 首先设置工具权限"
+            elif self.btn_enter_pwnedDFU.status != "Completed":
+                next_step = self.btn_enter_pwnedDFU
+                next_step_description = "A10+untethered降级: 进入Pwned DFU模式并输入Generator"
+            elif self.btn_restore_device.status != "Completed":
+                next_step = self.btn_restore_device
+                next_step_description = "A10+untethered降级: 使用SHSH还原设备"
+
+        # 高亮下一步按钮并显示日志提示
         if next_step:
+            # 使用更醒目的亮橙色作为下一步按钮的高亮颜色
             next_step.setStyleSheet(f"""
                 QPushButton {{
                     font-weight: bold;
@@ -1198,11 +1452,13 @@ class TurdusGUI(QMainWindow):
                     border-radius: 3px;
                     background-color: {HIGHLIGHT_COLOR};
                     color: white;
-                    border: 1px solid {HIGHLIGHT_COLOR};
+                    border: 2px solid #FF8C00;
                     text-align: left;
+                    box-shadow: 0 0 5px #FF8C00;
                 }}
                 QPushButton:hover {{
                     background-color: #FF8533;
+                    border: 2px solid #FFA500;
                 }}
                 QPushButton:pressed {{
                     background-color: #E65C00;
@@ -1210,6 +1466,10 @@ class TurdusGUI(QMainWindow):
             """)
 
             self.next_step_button = next_step
+
+            # 在日志中显示下一步操作提示
+            if next_step_description:
+                self.log_message(f"\n下一步操作: {next_step_description}", "BLUE")
 
     def update_button_status(self, button, status, color):
         """Update button status"""
@@ -1229,7 +1489,7 @@ class TurdusGUI(QMainWindow):
                     border-radius: 3px;
                     background-color: #006600;
                     color: white;
-                    border: none;
+                    border: 2px solid #008800;
                     text-align: left;
                 }
                 QPushButton:hover {
@@ -1249,7 +1509,7 @@ class TurdusGUI(QMainWindow):
                     border-radius: 3px;
                     background-color: #990000;
                     color: white;
-                    border: none;
+                    border: 2px solid #BB0000;
                     text-align: left;
                 }
                 QPushButton:hover {
@@ -1261,19 +1521,60 @@ class TurdusGUI(QMainWindow):
             if button.retry_button:
                 button.retry_button.setVisible(True)
 
-        elif status == "In Progress":
+        elif status == "Restart Here":
             button.setStyleSheet("""
                 QPushButton {
                     font-weight: bold;
                     padding: 6px 10px;
                     border-radius: 3px;
-                    background-color: #004488;
-                    color: white;
-                    border: none;
+                    background-color: #FFA500;
+                    color: black;
+                    border: 2px solid #FFB700;
                     text-align: left;
                 }
                 QPushButton:hover {
-                    background-color: #0055AA;
+                    background-color: #FFB700;
+                }
+            """)
+
+            # Hide retry button if visible
+            if button.retry_button:
+                button.retry_button.setVisible(False)
+
+        elif status == "In Progress":
+            # 闪烁效果在PyQt中需要使用定时器实现，这里使用动态的颜色变化
+            button.setStyleSheet("""
+                QPushButton {
+                    font-weight: bold;
+                    padding: 6px 10px;
+                    border-radius: 3px;
+                    background-color: #0066CC;
+                    color: white;
+                    border: 2px solid #4499FF;
+                    text-align: left;
+                }
+                QPushButton:hover {
+                    background-color: #0077DD;
+                }
+            """)
+
+            # Hide retry button if visible
+            if button.retry_button:
+                button.retry_button.setVisible(False)
+
+        elif status == "Partial":
+            button.setStyleSheet("""
+                QPushButton {
+                    font-weight: bold;
+                    padding: 6px 10px;
+                    border-radius: 3px;
+                    background-color: #CCAA00;
+                    color: black;
+                    border: 2px solid #DDBB00;
+                    text-align: left;
+                }
+                QPushButton:hover {
+                    background-color: #DDBB00;
                 }
             """)
 
@@ -1408,7 +1709,13 @@ class TurdusGUI(QMainWindow):
             QMessageBox.critical(self, "Error", "No firmware selected. Please select a firmware file first.")
             return
 
-        # Check if there's already a command running
+        # 对于untethered模式，检查是否有SHSH文件
+        if ("untether" in self.workflow_type) and not self.shsh_path:
+            QMessageBox.critical(self, "Error",
+                                 "No SHSH blob selected. Please select an SHSH blob file for untethered downgrade.")
+            return
+
+        # 检查是否已经有命令在运行
         if self.command_thread and self.command_thread.isRunning():
             QMessageBox.warning(self, "Operation in Progress",
                                 "Another operation is currently running. Please wait for it to complete.")
@@ -1418,7 +1725,7 @@ class TurdusGUI(QMainWindow):
         self.update_button_status(self.btn_enter_pwnedDFU, "In Progress", COLOR_BLUE)
         self.log_message("\n===== Entering pwned DFU mode =====", "BLUE")
 
-        # Manual mode, show confirmation dialog
+        # 手动模式，显示确认对话框
         result = QMessageBox.question(
             self, "Enter DFU Mode",
             "Please make sure your device is connected and in DFU mode.\n\nReady to continue?",
@@ -1432,9 +1739,29 @@ class TurdusGUI(QMainWindow):
             self.update_next_step_highlight()
             return
 
-        # Run turdusra1n -ED
+        # 根据不同工作流程执行不同命令
+        if "untether" in self.workflow_type:
+            # 输入generator
+            generator, ok = QInputDialog.getText(
+                self, "Generator Input",
+                "Enter the generator value from your SHSH blob:",
+                QLineEdit.EchoMode.Normal
+            )
+
+            if not ok or not generator:
+                self.update_button_status(self.btn_enter_pwnedDFU, "Canceled", COLOR_GREY)
+                self.current_operation_button = None
+                self.update_next_step_highlight()
+                return
+
+            self.generator = generator
+            cmd = f"./bin/turdusra1n -EDb {generator}"
+            self.log_message(f"Using generator: {generator}", "BLUE")
+        else:
+            cmd = "./bin/turdusra1n -ED"
+
         self.run_command(
-            "./bin/turdusra1n -ED",
+            cmd,
             callback=self._after_enter_pwned_dfu
         )
 
@@ -1476,11 +1803,9 @@ class TurdusGUI(QMainWindow):
 
         # Run turdus_merula to get shcblock
         cmd = f"./bin/turdus_merula --get-shcblock \"{self.firmware_path}\""
-        self.restart_from_phase = "Enter Pwned DFU"  # Set restart point if this fails
         self.run_command(
             cmd,
-            callback=self._after_extract_shcblock,
-            retry_with_ED=True
+            callback=self._after_extract_shcblock
         )
 
     def _after_extract_shcblock(self, success, _):
@@ -1488,9 +1813,10 @@ class TurdusGUI(QMainWindow):
         if not success:
             self.log_message("Failed to extract SHC block", "RED")
             self.update_button_status(self.btn_get_shcblock, "Failed", COLOR_RED)
+
             QMessageBox.critical(
                 self, "Error",
-                "Failed to extract SHC block. You need to restart from the 'Enter Pwned DFU Mode' step."
+                "Failed to extract SHC block. Please try again after re-entering Pwned DFU mode."
             )
             self.current_operation_button = None
             return
@@ -1516,11 +1842,11 @@ class TurdusGUI(QMainWindow):
                     self.log_message(f"Error copying SHC block: {str(e)}", "RED")
 
         if not self.shcblock_path:
-            self.log_message("No SHC block file was generated", "RED")
-            self.update_button_status(self.btn_get_shcblock, "Failed", COLOR_RED)
-            QMessageBox.critical(
-                self, "Error",
-                "No SHC block file was generated. You need to restart from the 'Enter Pwned DFU Mode' step."
+            self.log_message("No SHC block file found - you need to select one manually.", "YELLOW")
+            self.update_button_status(self.btn_get_shcblock, "Partial", COLOR_YELLOW)
+            QMessageBox.warning(
+                self, "Warning",
+                "No SHC block file was found automatically. You can proceed but will need to select an SHC block file manually."
             )
             self.current_operation_button = None
             return
@@ -1533,7 +1859,6 @@ class TurdusGUI(QMainWindow):
         self.update_button_status(self.btn_get_shcblock, "Completed", COLOR_GREEN)
 
         # Enable next button
-        self.btn_enter_pwnedDFU2.setEnabled(True)
         self.current_operation_button = None
 
     def reenter_pwned_dfu(self):
@@ -1622,11 +1947,9 @@ class TurdusGUI(QMainWindow):
 
         # Run turdus_merula to get pteblock
         cmd = f"./bin/turdus_merula --get-pteblock --load-shcblock \"{self.shcblock_path}\" \"{self.firmware_path}\""
-        self.restart_from_phase = "Enter Pwned DFU"  # Set restart point if this fails
         self.run_command(
             cmd,
-            callback=self._after_extract_pteblock,
-            retry_with_ED=True
+            callback=self._after_extract_pteblock
         )
 
     def _after_extract_pteblock(self, success, _):
@@ -1634,9 +1957,10 @@ class TurdusGUI(QMainWindow):
         if not success:
             self.log_message("Failed to extract PTE block", "RED")
             self.update_button_status(self.btn_get_pteblock, "Failed", COLOR_RED)
+
             QMessageBox.critical(
                 self, "Error",
-                "Failed to extract PTE block. You need to restart from the 'Enter Pwned DFU Mode' step."
+                "Failed to extract PTE block. Please try again after re-entering Pwned DFU mode."
             )
             self.current_operation_button = None
             return
@@ -1662,11 +1986,11 @@ class TurdusGUI(QMainWindow):
                     self.log_message(f"Error copying PTE block: {str(e)}", "RED")
 
         if not self.pteblock_path:
-            self.log_message("No PTE block file was generated", "RED")
-            self.update_button_status(self.btn_get_pteblock, "Failed", COLOR_RED)
-            QMessageBox.critical(
-                self, "Error",
-                "No PTE block file was generated. You need to restart from the 'Enter Pwned DFU Mode' step."
+            self.log_message("No PTE block file found - you need to select one manually.", "YELLOW")
+            self.update_button_status(self.btn_get_pteblock, "Partial", COLOR_YELLOW)
+            QMessageBox.warning(
+                self, "Warning",
+                "No PTE block file was found automatically. You can proceed but will need to select a PTE block file manually."
             )
             self.current_operation_button = None
             return
@@ -1678,7 +2002,6 @@ class TurdusGUI(QMainWindow):
         self.update_button_status(self.btn_get_pteblock, "Completed", COLOR_GREEN)
 
         # Enable next button
-        self.btn_enter_pwnedDFU3.setEnabled(True)
         self.current_operation_button = None
 
     def reenter_pwned_dfu_for_restore(self):
@@ -1700,7 +2023,7 @@ class TurdusGUI(QMainWindow):
         # In manual mode, show confirmation dialog
         result = QMessageBox.question(
             self, "Re-enter DFU Mode",
-            "Please put your device back in DFU mode.\n\nReady to continue?",
+            "请将您的设备重新进入DFU模式准备进行还原。\n\n准备好继续吗?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
@@ -1720,15 +2043,15 @@ class TurdusGUI(QMainWindow):
     def _after_reenter_pwned_dfu_restore(self, success, _):
         """Callback after re-entering pwned DFU mode for restoration"""
         if success:
-            self.log_message("Successfully re-entered pwned DFU mode", "GREEN")
+            self.log_message("成功重新进入Pwned DFU模式，准备进行设备还原", "GREEN")
             self.update_button_status(self.btn_enter_pwnedDFU3, "Completed", COLOR_GREEN)
             self.btn_restore_device.setEnabled(True)
         else:
-            self.log_message("Failed to re-enter pwned DFU mode", "RED")
+            self.log_message("重新进入Pwned DFU模式失败", "RED")
             self.update_button_status(self.btn_enter_pwnedDFU3, "Failed", COLOR_RED)
             QMessageBox.critical(
-                self, "Error",
-                "Failed to re-enter pwned DFU mode. Please check your device connection and try again."
+                self, "错误",
+                "进入Pwned DFU模式失败。请检查设备连接后重试。"
             )
 
         self.current_operation_button = None
@@ -1736,113 +2059,193 @@ class TurdusGUI(QMainWindow):
     def restore_device(self):
         """Restore device"""
         if not self.firmware_path:
-            QMessageBox.critical(self, "Error", "No firmware selected. Please select a firmware file first.")
+            QMessageBox.critical(self, "错误", "未选择固件。请先选择固件文件。")
             return
 
         # Check if there's already a command running
         if self.command_thread and self.command_thread.isRunning():
-            QMessageBox.warning(self, "Operation in Progress",
-                                "Another operation is currently running. Please wait for it to complete.")
+            QMessageBox.warning(self, "操作进行中",
+                                "另一个操作正在进行。请等待其完成。")
             return
 
-        # Check both the internal path and the widget path
-        custom_pteblock_path = self.pteblock_path_widget.get_path()
+        # 根据不同工作流程检查所需文件
+        if self.workflow_type == "a9_tether":
+            # Check both the internal path and the widget path
+            custom_pteblock_path = self.pteblock_path_widget.get_path()
 
-        if not self.pteblock_path and not custom_pteblock_path:
-            QMessageBox.critical(self, "Error",
-                                 "PTE block not found. Please extract the PTE block first or select a PTE block file manually.")
-            return
+            if not self.pteblock_path and not custom_pteblock_path:
+                QMessageBox.critical(self, "错误",
+                                     "未找到PTE block。请先提取PTE block或手动选择PTE block文件。")
+                return
+
+            # Use the manually selected path if available, otherwise use the internal path
+            if custom_pteblock_path:
+                self.pteblock_path = custom_pteblock_path
+
+        elif self.workflow_type == "a9_untether":
+            # 检查SHSH和SHC block
+            if not self.shsh_path:
+                QMessageBox.critical(self, "错误", "未选择SHSH blob文件。请选择SHSH blob文件。")
+                return
+
+            custom_shcblock_path = self.shcblock_path_widget.get_path()
+            if not self.shcblock_path and not custom_shcblock_path:
+                QMessageBox.critical(self, "错误",
+                                     "未找到SHC block。请先提取SHC block或手动选择SHC block文件。")
+                return
+
+            # Use the manually selected path if available
+            if custom_shcblock_path:
+                self.shcblock_path = custom_shcblock_path
+
+        elif self.workflow_type == "a10_untether":
+            # 检查SHSH
+            if not self.shsh_path:
+                QMessageBox.critical(self, "错误", "未选择SHSH blob文件。请选择SHSH blob文件。")
+                return
+
+        # A10_tether不需要特殊检查
 
         self.current_operation_button = self.btn_restore_device
         self.update_button_status(self.btn_restore_device, "In Progress", COLOR_BLUE)
-        self.log_message("\n===== Restoring device =====", "BLUE")
+        self.log_message("\n===== 正在还原设备 =====", "BLUE")
 
-        # Use the manually selected path if available, otherwise use the internal path
-        if custom_pteblock_path:
-            self.pteblock_path = custom_pteblock_path
-            self.log_message(f"Using custom PTE block path: {custom_pteblock_path}", "BLUE")
+        # 根据不同工作流程执行不同命令
+        if self.workflow_type == "a9_tether":
+            self.log_message(f"使用PTE block: {os.path.basename(self.pteblock_path)}", "BLUE")
+            cmd = f"./bin/turdus_merula -o --load-pteblock \"{self.pteblock_path}\" \"{self.firmware_path}\""
 
-        # Run turdus_merula to restore device
-        cmd = f"./bin/turdus_merula -o --load-pteblock \"{self.pteblock_path}\" \"{self.firmware_path}\""
-        self.restart_from_phase = "Enter Pwned DFU"  # Set restart point if this fails
+        elif self.workflow_type == "a10_tether":
+            cmd = f"./bin/turdus_merula -o \"{self.firmware_path}\""
+
+        elif self.workflow_type == "a9_untether":
+            self.log_message(f"使用SHC block: {os.path.basename(self.shcblock_path)}", "BLUE")
+            self.log_message(f"使用SHSH blob: {os.path.basename(self.shsh_path)}", "BLUE")
+            cmd = f"./bin/turdus_merula -w --load-shsh \"{self.shsh_path}\" --load-shcblock \"{self.shcblock_path}\" \"{self.firmware_path}\""
+
+        else:  # a10_untether
+            self.log_message(f"使用SHSH blob: {os.path.basename(self.shsh_path)}", "BLUE")
+            cmd = f"./bin/turdus_merula -w --load-shsh \"{self.shsh_path}\" \"{self.firmware_path}\""
+
         self.run_command(
             cmd,
-            callback=self._after_restore_device,
-            retry_with_ED=True
+            callback=self._after_restore_device
         )
 
     def _after_restore_device(self, success, _):
         """Callback after restoring device"""
         if not success:
-            self.log_message("Failed to restore device", "RED")
+            self.log_message("设备还原失败", "RED")
             self.update_button_status(self.btn_restore_device, "Failed", COLOR_RED)
+
             QMessageBox.critical(
-                self, "Error",
-                "Failed to restore device. You need to restart from the 'Enter Pwned DFU Mode' step."
+                self, "错误",
+                "设备还原失败。请在重新进入Pwned DFU模式后再次尝试。"
             )
             self.current_operation_button = None
             return
 
-        self.log_message("Please follow any additional steps shown in the terminal", "GREEN")
-        self.log_message("Device restoration completed successfully", "GREEN")
+        self.log_message("请按照终端窗口中显示的任何其他步骤进行操作", "GREEN")
+        self.log_message("设备还原成功完成", "GREEN")
         self.update_button_status(self.btn_restore_device, "Completed", COLOR_GREEN)
 
-        # Enable boot button directly
-        self.btn_boot_device.setEnabled(True)
+        # 不需要显式启用，所有按钮都是可点击的
         self.current_operation_button = None
 
     def boot_device(self):
         """Boot device"""
         # Check if there's already a command running
         if self.command_thread and self.command_thread.isRunning():
-            QMessageBox.warning(self, "Operation in Progress",
-                                "Another operation is currently running. Please wait for it to complete.")
-            return
-
-        # Check both the internal path and the widget path
-        custom_pteblock_path = self.pteblock_path_widget.get_path()
-
-        if not self.pteblock_path and not custom_pteblock_path:
-            QMessageBox.critical(self, "Error",
-                                 "PTE block not found. Please restore the device first or select a PTE block file manually.")
+            QMessageBox.warning(self, "操作进行中",
+                                "另一个操作正在进行。请等待其完成。")
             return
 
         self.current_operation_button = self.btn_boot_device
         self.update_button_status(self.btn_boot_device, "In Progress", COLOR_BLUE)
-        self.log_message("\n===== Booting device =====", "BLUE")
+        self.log_message("\n===== 正在引导设备启动 =====", "BLUE")
 
-        # Use the manually selected path if available, otherwise use the internal path
-        if custom_pteblock_path:
-            self.pteblock_path = custom_pteblock_path
-            self.log_message(f"Using custom PTE block path: {custom_pteblock_path}", "BLUE")
+        # 根据不同工作流程执行不同命令
+        if self.workflow_type == "a9_tether" or self.workflow_type == "a9_untether":
+            # Check both the internal path and the widget path
+            custom_pteblock_path = self.pteblock_path_widget.get_path()
 
-        # Run turdusra1n -TP (no need to be in pwnd DFU mode for this)
-        cmd = f"./bin/turdusra1n -TP \"{self.pteblock_path}\""
+            if not self.pteblock_path and not custom_pteblock_path:
+                QMessageBox.critical(self, "错误",
+                                     "未找到PTE block。请先完成设备还原或手动选择PTE block文件。")
+                return
+
+            # Use the manually selected path if available, otherwise use the internal path
+            if custom_pteblock_path:
+                self.pteblock_path = custom_pteblock_path
+                self.log_message(f"使用自定义PTE block路径: {custom_pteblock_path}", "BLUE")
+
+            # Run turdusra1n -TP
+            cmd = f"./bin/turdusra1n -TP \"{self.pteblock_path}\""
+
+        elif self.workflow_type == "a10_tether":
+            # 检查image4文件夹中的文件
+            image4_dir = "./image4"
+            if not os.path.exists(image4_dir):
+                QMessageBox.critical(self, "错误",
+                                     "未找到image4文件夹。请检查还原操作是否成功完成。")
+                self.update_button_status(self.btn_boot_device, "Failed", COLOR_RED)
+                self.current_operation_button = None
+                return
+
+            # 查找需要的文件
+            iboot_files = glob.glob(os.path.join(image4_dir, "*iBoot*.img4"))
+            sep_signed_files = glob.glob(os.path.join(image4_dir, "*signed-SEP*.img4"))
+            sep_target_files = glob.glob(os.path.join(image4_dir, "*target-SEP*.im4p"))
+
+            if not iboot_files or not sep_signed_files or not sep_target_files:
+                QMessageBox.critical(self, "错误",
+                                     "未找到所需的image4文件。请检查还原操作是否成功完成。")
+                self.update_button_status(self.btn_boot_device, "Failed", COLOR_RED)
+                self.current_operation_button = None
+                return
+
+            iboot_file = iboot_files[0]
+            sep_signed_file = sep_signed_files[0]
+            sep_target_file = sep_target_files[0]
+
+            self.log_message(f"使用iBoot文件: {os.path.basename(iboot_file)}", "BLUE")
+            self.log_message(f"使用signed SEP文件: {os.path.basename(sep_signed_file)}", "BLUE")
+            self.log_message(f"使用target SEP文件: {os.path.basename(sep_target_file)}", "BLUE")
+
+            # Run turdusra1n -t -i -p
+            cmd = f"./bin/turdusra1n -t \"{iboot_file}\" -i \"{sep_signed_file}\" -p \"{sep_target_file}\""
+
+        else:  # a10_untether
+            QMessageBox.information(self, "信息",
+                                    "对于A10(X) untethered降级，设备将在还原后自动启动。")
+            self.update_button_status(self.btn_boot_device, "Completed", COLOR_GREEN)
+            self.current_operation_button = None
+            return
+
         self.run_command(
             cmd,
-            callback=self._after_boot_device,
-            retry_with_ED=True
+            callback=self._after_boot_device
         )
 
     def _after_boot_device(self, success, _):
         """Callback after booting device"""
         if not success:
-            self.log_message("Failed to boot device", "RED")
+            self.log_message("设备引导失败", "RED")
             self.update_button_status(self.btn_boot_device, "Failed", COLOR_RED)
             QMessageBox.critical(
-                self, "Error",
-                "Failed to boot device. Please check your device connection and try again."
+                self, "错误",
+                "设备引导失败。请检查设备连接后重试。"
             )
         else:
-            self.log_message("Device has been booted successfully!", "GREEN")
+            self.log_message("设备已成功引导启动！", "GREEN")
             self.update_button_status(self.btn_boot_device, "Completed", COLOR_GREEN)
             QMessageBox.information(
-                self, "Success",
-                "Device has been booted successfully!\n\nYour device should now be running the restored iOS version."
+                self, "成功",
+                "设备已成功引导启动！\n\n您的设备现在应该正在运行已还原的iOS版本。"
             )
 
-        self.log_message("\n====== Process complete! ======", "GREEN")
-        self.log_message("Your device should now be running the restored iOS version", "GREEN")
+        self.log_message("\n====== 流程完成！ ======", "GREEN")
+        self.log_message("您的设备现在应该正在运行已还原的iOS版本", "GREEN")
         self.current_operation_button = None
 
 
@@ -1865,7 +2268,7 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as e:
-        QMessageBox.critical(None, "Error", f"Application error: {str(e)}")
+        QMessageBox.critical(None, "错误", f"应用程序错误: {str(e)}")
         print(f"Error: {str(e)}")
         import traceback
 
