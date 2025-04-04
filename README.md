@@ -37,7 +37,7 @@ Turdus Merula GUI is a PyQt-based application that wraps the functionality of tu
 
 1. Clone the repository:
 ```bash
-git clone https://github.com/yourusername/turdus_merula_gui.git
+git clone https://github.com/AnInsomniacy/turdus_m3rula_GUI.git
 cd turdus_merula_gui
 ```
 
