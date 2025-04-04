@@ -6,7 +6,14 @@ A graphical user interface for turdus_m3rula, providing an easy-to-use interface
 
 Turdus Merula GUI is a PyQt-based application that wraps the functionality of turdus_m3rula tools into a user-friendly interface. It supports both A9 and A10 devices with tethered and untethered downgrade options.
 
-> **IMPORTANT:** This GUI is only a wrapper. The core downgrade tool `turdus_m3rula` is NOT included and must be properly set up separately before using this interface.
+> **IMPORTANT:** This GUI is only a wrapper. The core downgrade tool `turdus_m3rula` is NOT included and must be properly set up separately before using this interface. To set up turdus_m3rula:
+>
+> 1. Download the turdus_m3rula package from its official source
+> 2. Place the entire turdus_m3rula folder directly in this project's root directory
+> 3. Do not modify the folder structure or rename any components
+> 4. Use the "Set Tool Permissions" button within the application to set the correct permissions
+>
+> The application will expect to find the turdus_m3rula tools at the path: `./turdus_m3rula/bin/`
 
 ## Features
 
@@ -38,17 +45,21 @@ pip install PyQt6
 ```
 
 3. **IMPORTANT**: Setup the turdus_m3rula tools
-    - The `turdus_m3rula` directory with its tools must be placed in the same directory as this GUI
-    - The application expects the following structure:
+    - Simply download the turdus_m3rula package and place the **entire folder** directly in the project root directory
+    - Do NOT extract or modify the contents of the turdus_m3rula folder - keep its original structure
+    - The application expects the following directory structure:
       ```
       ./
       ├── main.py
-      ├── turdus_m3rula/
-      │   └── bin/
-      │       ├── turdusra1n
-      │       └── turdus_merula
+      ├── config.py
+      ├── core/
+      ├── gui/
+      └── turdus_m3rula/    <-- Place the entire folder here
+          └── bin/
+              ├── turdusra1n
+              └── turdus_merula
       ```
-    - Make sure these tools have the correct permissions
+    - The first step in the application will help set the proper permissions for these tools
 
 ## Usage
 
