@@ -1,6 +1,8 @@
 # Turdus Merula GUI
 
 A graphical user interface for turdus_m3rula, providing an easy-to-use interface for iOS device downgrading operations.
+<img width="1236" alt="WechatIMG1866" src="https://github.com/user-attachments/assets/dde6e1bf-1f51-4d93-aaa8-0442ad38abe6" />
+
 
 ## Overview
 
