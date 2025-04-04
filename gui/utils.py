@@ -129,7 +129,7 @@ def update_button_status(button, status, color):
             button.retry_button.setVisible(False)
 
     elif status == "In Progress":
-        # Blinking effect in PyQt requires a timer - here we use dynamic color change
+        # 使用更亮的边框，不使用box-shadow
         button.setStyleSheet("""
             QPushButton {
                 font-weight: bold;
@@ -137,7 +137,7 @@ def update_button_status(button, status, color):
                 border-radius: 3px;
                 background-color: #0066CC;
                 color: white;
-                border: 2px solid #4499FF;
+                border: 3px solid #4499FF;
                 text-align: left;
             }
             QPushButton:hover {
@@ -204,6 +204,7 @@ def highlight_next_step_button(button):
     Args:
         button (OperationButton): Button to highlight
     """
+    # 使用更粗的边框和不同的颜色突出显示，而不是box-shadow
     button.setStyleSheet(f"""
         QPushButton {{
             font-weight: bold;
@@ -211,13 +212,12 @@ def highlight_next_step_button(button):
             border-radius: 3px;
             background-color: {HIGHLIGHT_COLOR};
             color: white;
-            border: 2px solid #FF8C00;
+            border: 3px solid #FF8C00;
             text-align: left;
-            box-shadow: 0 0 5px #FF8C00;
         }}
         QPushButton:hover {{
             background-color: #FF8533;
-            border: 2px solid #FFA500;
+            border: 3px solid #FFA500;
         }}
         QPushButton:pressed {{
             background-color: #E65C00;

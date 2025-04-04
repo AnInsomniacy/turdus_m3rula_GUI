@@ -1,4 +1,57 @@
-#!/usr/bin/env python3
+def update_workflow_buttons(self):
+    """更新当前工作流程中所有按钮的显示和高亮状态"""
+    # 先重置所有按钮为基本样式
+    for button_index, button in self.button_map.items():
+        if button.status != "Completed" and button.status != "Failed":
+            button.setStyleSheet("""
+                    QPushButton {
+                        font-weight: bold;
+                        padding: 6px 10px;
+                        border-radius: 3px;
+                        background-color: #3D3D3D;
+                        color: #E0E0E0;
+                        border: 1px solid #505050;
+                        text-align: left;
+                    }
+                    QPushButton:hover {
+                        background-color: #4D4D4D;
+                    }
+                    QPushButton:pressed {
+                        background-color: #606060;
+                    }
+                    QPushButton:disabled {
+                        background-color: #353535;
+                        color: #707070;
+                        border: 1px solid #404040;
+                    }
+                """)
+
+    # 如果没有选择固件，提示用户并返回
+    if not self.firmware_path:
+        self.log_message("Please select a firmware file first", "YELLOW")
+        return
+
+    # 如果是非绑定降级但没有SHSH，提示用户并返回
+    if self.workflow.downgrade_type == DowngradeType.UNTETHERED and not self.shsh_path:
+        self.log_message(f"{self.workflow.description}: Please select an SHSH blob file", "YELLOW")
+        return
+
+    # 高亮显示当前工作流所有需要的按钮
+    workflow_buttons = []
+    for step_info in self.workflow.steps.values():
+        if step_info.button_index > 0:  # 跳过没有对应按钮的步骤
+            button = self.button_map.get(step_info.button_index)
+            if button:
+                workflow_buttons.append(button)
+
+                # 如果按钮尚未完成或失败，高亮显示它
+                if button.status != "Completed" and button.status != "Failed":
+                    highlight_next_step_button(button)
+
+    # 找出需要执行的下一个步骤并添加提示
+    self.update_next_step_highlight()  # !/usr/bin/env python3
+
+
 # -*- coding: utf-8 -*-
 
 # gui/main_window.py - Main window implementation
@@ -7,6 +60,7 @@ import glob
 import os
 import shutil
 import sys
+import time
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
@@ -765,7 +819,7 @@ class TurdusGUI(QMainWindow):
 
         log_layout.addWidget(options_frame)
 
-        # Log header with title and clear button
+        # Log header with title and buttons
         log_header = QFrame()
         header_layout = QHBoxLayout(log_header)
         header_layout.setContentsMargins(0, 0, 0, 0)
@@ -775,6 +829,27 @@ class TurdusGUI(QMainWindow):
         header_layout.addWidget(log_title)
 
         header_layout.addStretch(1)
+
+        # Generate log button
+        generate_log_button = QPushButton("Generate Log")
+        generate_log_button.clicked.connect(self.generate_log_file)
+        generate_log_button.setFixedWidth(120)
+        generate_log_button.setStyleSheet("""
+            QPushButton {
+                background-color: #3D3D3D;
+                color: #E0E0E0;
+                border: 1px solid #505050;
+                border-radius: 3px;
+                padding: 4px;
+            }
+            QPushButton:hover {
+                background-color: #4D4D4D;
+            }
+        """)
+        header_layout.addWidget(generate_log_button)
+
+        # Add spacing between buttons
+        header_layout.addSpacing(5)
 
         # Clear log button
         clear_log_button = QPushButton("Clear Log")
@@ -804,7 +879,7 @@ class TurdusGUI(QMainWindow):
                 background-color: #252525;
                 color: #E0E0E0;
                 border: 1px solid #505050;
-                font-family: Consolas, Courier, monospace;
+                font-family: "Courier New", monospace, Courier;
                 font-size: 12px;
             }
         """)
@@ -829,23 +904,10 @@ class TurdusGUI(QMainWindow):
             self.firmware_path_label.setText(file_path)
             self.log_message(f"Selected firmware: {os.path.basename(file_path)}", "GREEN")
 
-            # Copy file to working directory if user wants
-            if QMessageBox.question(
-                    self, "Copy Firmware",
-                    f"Would you like to copy {os.path.basename(file_path)} to the working directory?\n\n"
-                    f"This will create a backup in {WORK_DIR}/ipsw/",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.Yes
-            ) == QMessageBox.StandardButton.Yes:
-                try:
-                    self.log_message(f"Copying firmware to working directory...", "BLUE")
-                    dest_path = copy_firmware_to_workdir(file_path, WORK_DIR)
-                    self.log_message(f"Firmware copied to: {dest_path}", "GREEN")
-                except Exception as e:
-                    self.log_message(f"Error copying firmware: {str(e)}", "RED")
+            # 直接使用选择的固件文件，不再复制到工作目录
 
-            # Update next step highlight
-            self.update_next_step_highlight()
+            # 更新工作流按钮状态
+            self.update_workflow_buttons()
 
     def browse_shsh(self):
         """Browse and select SHSH file"""
@@ -857,17 +919,66 @@ class TurdusGUI(QMainWindow):
             self.shsh_path = file_path
             self.shsh_path_label.setText(file_path)
             self.log_message(f"Selected SHSH blob: {os.path.basename(file_path)}", "GREEN")
-            # Update next step highlight in case this was holding us back
-            self.update_next_step_highlight()
+            # 更新工作流按钮状态
+            self.update_workflow_buttons()
 
     def log_message(self, message, color_tag=None):
-        """Add message to log area"""
+        """Add formatted message to log area with timestamp if not already present"""
+        # Add timestamp if not already in message
+        if not message.startswith("[20"):  # Check if message already has timestamp
+            current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+            if color_tag == "RED":
+                prefix = "[ERROR] "
+            elif color_tag == "YELLOW":
+                prefix = "[WARN] "
+            elif color_tag == "GREEN":
+                prefix = "[INFO] "
+            elif color_tag == "BLUE":
+                prefix = "[SYSTEM] "
+            else:
+                prefix = "[LOG] "
+
+            # Only add timestamp for messages without it
+            if not message.startswith(prefix):
+                message = f"[{current_time}] {prefix}{message}"
+
+        # Use the utility function to log the message
         log_message(self.log_text, message, color_tag)
 
     def clear_log(self):
-        """Clear log"""
+        """Clear log and add header"""
         self.log_text.clear()
-        self.log_message("Log cleared", "GREY")
+        current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+        self.log_message(f"[{current_time}] Log cleared - Starting new session", "GREY")
+
+    def generate_log_file(self):
+        """Generate a log file with current content"""
+        # Create logs directory if it doesn't exist
+        log_dir = os.path.join(WORK_DIR, "logs")
+        os.makedirs(log_dir, exist_ok=True)
+
+        # Generate filename with timestamp
+        timestamp = time.strftime("%Y%m%d_%H%M%S", time.localtime())
+        log_filename = os.path.join(log_dir, f"turdus_log_{timestamp}.txt")
+
+        try:
+            # Write log content to file
+            with open(log_filename, 'w', encoding='utf-8') as f:
+                f.write(self.log_text.toPlainText())
+
+            # Add confirmation to log
+            self.log_message(f"Log file saved to: {log_filename}", "GREEN")
+
+            # Show confirmation dialog
+            QMessageBox.information(
+                self, "Log Generated",
+                f"Log file has been saved to:\n{log_filename}"
+            )
+
+        except Exception as e:
+            error_msg = f"Error saving log file: {str(e)}"
+            self.log_message(error_msg, "RED")
+            QMessageBox.critical(self, "Error", error_msg)
 
     def update_workflow(self):
         """Update workflow based on CPU type and downgrade method"""
@@ -880,41 +991,48 @@ class TurdusGUI(QMainWindow):
         # Get the corresponding workflow
         self.workflow = get_workflow(cpu_type.value, downgrade_type.value)
 
-        # Log workflow change
+        # Auto clear log when workflow changes
+        self.clear_log()
+
+        # Log workflow change with timestamp
+        current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         workflow_msg = f"Workflow updated: {cpu_type.value} + {downgrade_type.value} downgrade"
-        self.log_message(f"\n===== {workflow_msg} =====", "BLUE")
+        self.log_message(f"[{current_time}] ===== {workflow_msg} =====", "BLUE")
 
         # Log workflow information
-        self.log_message(self.workflow.log_message, "GREEN")
-        self.log_message(self.workflow.warning_message, "YELLOW")
+        self.log_message(f"[INFO] {self.workflow.log_message}", "GREEN")
+        self.log_message(f"[WARN] {self.workflow.warning_message}", "YELLOW")
 
         # Update SHSH file selector visibility - untethered mode needs SHSH file
         self.shsh_path_label.setEnabled(downgrade_type == DowngradeType.UNTETHERED)
 
         if downgrade_type == DowngradeType.UNTETHERED and not self.shsh_path:
-            self.log_message("Please select an SHSH blob file before continuing", "RED")
+            self.log_message("[ERROR] Please select an SHSH blob file before continuing", "RED")
 
-        # Reset incomplete step button states for re-highlighting
-        buttons = [
-            self.btn_set_permissions,
-            self.btn_enter_pwnedDFU,
-            self.btn_get_shcblock,
-            self.btn_enter_pwnedDFU2,
-            self.btn_get_pteblock,
-            self.btn_enter_pwnedDFU3,
-            self.btn_restore_device,
-            self.btn_boot_device
-        ]
+        # Reset button status, but preserve completed steps
+        for button_index, button in self.button_map.items():
+            # Check if button corresponds to a step in current workflow
+            button_is_relevant = False
+            for step_info in self.workflow.steps.values():
+                if step_info.button_index == button_index:
+                    button_is_relevant = True
+                    break
 
-        for button in buttons:
-            if button.status != "Completed" and button.status != "Failed":
-                button.status = "Ready"
+            # Only modify status of relevant buttons
+            if button_is_relevant:
+                # If button is already completed, keep that status
+                if button.status != "Completed" and button.status != "Failed":
+                    button.status = "Ready"
+                button.setVisible(True)  # Ensure relevant buttons are visible
+            else:
+                # For irrelevant buttons, hide them
+                button.setVisible(False)
 
-        # Reset current step to start fresh with new workflow
+        # Reset current step to determine where to start
         self.current_step = None
 
-        # Update button highlight colors
-        self.update_next_step_highlight()
+        # Update button highlights, showing next step in new workflow
+        self.update_workflow_buttons()
 
     def run_command(self, command, callback=None, timeout=None, check_output=False, retry_with_ED=False, max_retries=2):
         """Run command with improved safety"""
@@ -995,8 +1113,8 @@ class TurdusGUI(QMainWindow):
         # Enable appropriate buttons
         self.update_button_states()
 
-        # Update next step highlight
-        self.update_next_step_highlight()
+        # 更新工作流按钮状态
+        self.update_workflow_buttons()
 
     def handle_command_timeout(self):
         """Handle command timeout for auto-retry"""
@@ -1075,18 +1193,72 @@ class TurdusGUI(QMainWindow):
             # 重新启用按钮
             self.update_button_states()
 
-            # 更新下一步高亮
-            self.update_next_step_highlight()
+            # 更新工作流按钮状态
+            self.update_workflow_buttons()
 
         except Exception as e:
             # 最终的安全网，捕获所有异常
             self.log_message(f"Warning: UI update issue: {str(e)}", "RED")
 
     def update_next_step_highlight(self):
-        """Highlight the next step button to guide user workflow"""
-        # Clear previous highlights from all buttons
-        for button_index in self.button_map:
-            button = self.button_map[button_index]
+        """Find the next step to execute and provide guidance"""
+        # Check firmware and SHSH files
+        if not self.firmware_path:
+            self.log_message("Please select a firmware file first", "YELLOW")
+            return
+
+        if self.workflow.downgrade_type == DowngradeType.UNTETHERED and not self.shsh_path:
+            self.log_message(f"{self.workflow.description}: Please select an SHSH blob file", "YELLOW")
+            return
+
+        # Find next step
+        next_step_info = None
+
+        # If no current step, get the first step
+        if not self.current_step:
+            next_step_info = self.workflow.get_first_step()
+        else:
+            # Find next step based on current step and completion status
+            current_step_button = self.button_map.get(self.workflow.steps[self.current_step].button_index)
+
+            # Only proceed to next step if current step is completed
+            if current_step_button and current_step_button.status == "Completed":
+                next_step_info = self.workflow.get_next_step(self.current_step)
+
+                # Check for files before proceeding
+                if next_step_info and WorkflowStep.CHECK_SHC == next_step_info.step:
+                    # Check if SHC file exists or is selected
+                    if not self.shcblock_path and not self.shcblock_path_widget.get_path():
+                        self.log_message(next_step_info.description, "YELLOW")
+                        return
+                    # If SHC file exists, skip to next step
+                    next_step_info = self.workflow.get_next_step(next_step_info.step)
+
+                elif next_step_info and WorkflowStep.CHECK_PTE == next_step_info.step:
+                    # Check if PTE file exists or is selected
+                    if not self.pteblock_path and not self.pteblock_path_widget.get_path():
+                        self.log_message(next_step_info.description, "YELLOW")
+                        return
+                    # If PTE file exists, skip to next step
+                    next_step_info = self.workflow.get_next_step(next_step_info.step)
+            else:
+                # If current step is not completed, highlight it
+                next_step_info = self.workflow.steps.get(self.current_step)
+
+        # If we have a next step, provide guidance
+        if next_step_info and next_step_info.button_index > 0:
+            next_button = self.button_map.get(next_step_info.button_index)
+            if next_button:
+                # Show next operation guidance
+                self.log_message(f"Next operation: {next_step_info.description}", "BLUE")
+
+                # Set current step
+                self.current_step = next_step_info.step
+
+    def update_workflow_buttons(self):
+        """更新当前工作流程中所有按钮的显示和高亮状态"""
+        # 先重置所有按钮为基本样式
+        for button_index, button in self.button_map.items():
             if button.status != "Completed" and button.status != "Failed":
                 button.setStyleSheet("""
                     QPushButton {
@@ -1111,63 +1283,30 @@ class TurdusGUI(QMainWindow):
                     }
                 """)
 
-        # Check if firmware has been selected
+        # 如果没有选择固件，提示用户并返回
         if not self.firmware_path:
             self.log_message("Please select a firmware file first", "YELLOW")
             return
 
-        # Check if SHSH file has been selected for untethered mode
+        # 如果是非绑定降级但没有SHSH，提示用户并返回
         if self.workflow.downgrade_type == DowngradeType.UNTETHERED and not self.shsh_path:
             self.log_message(f"{self.workflow.description}: Please select an SHSH blob file", "YELLOW")
             return
 
-        # Find next step to highlight
-        next_step_info = None
+        # 高亮显示当前工作流所有需要的按钮
+        workflow_buttons = []
+        for step_info in self.workflow.steps.values():
+            if step_info.button_index > 0:  # 跳过没有对应按钮的步骤
+                button = self.button_map.get(step_info.button_index)
+                if button:
+                    workflow_buttons.append(button)
 
-        # If we don't have a current step, get the first step
-        if not self.current_step:
-            next_step_info = self.workflow.get_first_step()
-        else:
-            # Find the next step based on the current step and completion status
-            current_step_button = self.button_map.get(self.workflow.steps[self.current_step].button_index)
+                    # 如果按钮尚未完成或失败，高亮显示它
+                    if button.status != "Completed" and button.status != "Failed":
+                        highlight_next_step_button(button)
 
-            # Only proceed to next step if current step is completed
-            if current_step_button and current_step_button.status == "Completed":
-                next_step_info = self.workflow.get_next_step(self.current_step)
-
-                # If we need to check for files, do so before advancing
-                if next_step_info and WorkflowStep.CHECK_SHC == next_step_info.step:
-                    # Check if SHC file exists or is selected
-                    if not self.shcblock_path and not self.shcblock_path_widget.get_path():
-                        self.log_message(next_step_info.description, "YELLOW")
-                        return
-                    # If SHC file exists, skip to the next step
-                    next_step_info = self.workflow.get_next_step(next_step_info.step)
-
-                elif next_step_info and WorkflowStep.CHECK_PTE == next_step_info.step:
-                    # Check if PTE file exists or is selected
-                    if not self.pteblock_path and not self.pteblock_path_widget.get_path():
-                        self.log_message(next_step_info.description, "YELLOW")
-                        return
-                    # If PTE file exists, skip to the next step
-                    next_step_info = self.workflow.get_next_step(next_step_info.step)
-            else:
-                # If current step is not completed, highlight it
-                next_step_info = self.workflow.steps.get(self.current_step)
-
-        # If we have a step to highlight, do so
-        if next_step_info and next_step_info.button_index > 0:
-            next_button = self.button_map.get(next_step_info.button_index)
-            if next_button:
-                # Highlight the button
-                highlight_next_step_button(next_button)
-                self.next_step_button = next_button
-
-                # Display next operation prompt in log
-                self.log_message(f"\nNext operation: {next_step_info.description}", "BLUE")
-
-                # Set current step
-                self.current_step = next_step_info.step
+        # 找出需要执行的下一个步骤并添加提示
+        self.update_next_step_highlight()
 
     # Individual operation methods
     def set_tool_permissions(self):
@@ -1181,7 +1320,7 @@ class TurdusGUI(QMainWindow):
         self.current_operation_button = self.btn_set_permissions
         self.current_step = WorkflowStep.SET_PERMISSIONS
         update_button_status(self.btn_set_permissions, "In Progress", COLOR_BLUE)
-        self.log_message("\n===== Setting tool permissions =====", "BLUE")
+        self.log_message("Setting tool permissions", "BLUE")
 
         # Run xattr command
         self.run_command(

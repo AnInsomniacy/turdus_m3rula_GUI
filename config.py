@@ -14,7 +14,8 @@ BG_MEDIUM = "#3D3D3D"  # Medium background
 TEXT_LIGHT = "#E0E0E0"  # Light text
 HIGHLIGHT_COLOR = "#FF6600"  # Highlight color for next steps
 BUTTON_HIGHLIGHT_BORDER = "#FFB700"  # Border color for highlighted buttons
-BUTTON_HIGHLIGHT_GLOW = "0 0 8px #FF8C00"  # Glow effect for highlighted buttons
+# 移除了不被Qt支持的box-shadow属性
+# BUTTON_HIGHLIGHT_GLOW = "0 0 8px #FF8C00"  # Glow effect for highlighted buttons
 
 # Paths
 WORK_DIR = "./downgrade_work"
