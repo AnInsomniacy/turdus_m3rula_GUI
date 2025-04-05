@@ -275,11 +275,11 @@ class A9UntetheredWorkflow(Workflow):
         """Initialize A9 + untethered workflow steps"""
         super()._init_steps()
 
-        # Step 2: Enter Pwned DFU and input Generator
+        # Step 2: Enter Pwned DFU (use -ED without generator)
         self.add_step(
             WorkflowStep.ENTER_PWNED_DFU,
             2,
-            "A9+untethered downgrade: Enter Pwned DFU mode and input Generator",
+            "A9+untethered downgrade: Enter Pwned DFU mode",
             requires_files=["shsh"],
             next_step=WorkflowStep.EXTRACT_SHC
         )
@@ -300,10 +300,10 @@ class A9UntetheredWorkflow(Workflow):
             next_step=WorkflowStep.REENTER_DFU_FOR_RESTORE
         )
 
-        # Step 6: Re-enter Pwned DFU for device restoration (using button 4)
+        # Step 6: Re-enter Pwned DFU for device restoration (using button 6 instead of 4)
         self.add_step(
             WorkflowStep.REENTER_DFU_FOR_RESTORE,
-            4,
+            6,  # Changed from 4 to 6 to use Phase 4's button
             "A9+untethered downgrade: Re-enter Pwned DFU mode to prepare for restore",
             next_step=WorkflowStep.RESTORE_DEVICE
         )

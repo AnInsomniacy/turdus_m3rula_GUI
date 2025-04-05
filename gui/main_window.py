@@ -1,57 +1,3 @@
-def update_workflow_buttons(self):
-    """更新当前工作流程中所有按钮的显示和高亮状态"""
-    # 先重置所有按钮为基本样式
-    for button_index, button in self.button_map.items():
-        if button.status != "Completed" and button.status != "Failed":
-            button.setStyleSheet("""
-                    QPushButton {
-                        font-weight: bold;
-                        padding: 6px 10px;
-                        border-radius: 3px;
-                        background-color: #3D3D3D;
-                        color: #E0E0E0;
-                        border: 1px solid #505050;
-                        text-align: left;
-                    }
-                    QPushButton:hover {
-                        background-color: #4D4D4D;
-                    }
-                    QPushButton:pressed {
-                        background-color: #606060;
-                    }
-                    QPushButton:disabled {
-                        background-color: #353535;
-                        color: #707070;
-                        border: 1px solid #404040;
-                    }
-                """)
-
-    # 如果没有选择固件，提示用户并返回
-    if not self.firmware_path:
-        self.log_message("Please select a firmware file first", "YELLOW")
-        return
-
-    # 如果是非绑定降级但没有SHSH，提示用户并返回
-    if self.workflow.downgrade_type == DowngradeType.UNTETHERED and not self.shsh_path:
-        self.log_message(f"{self.workflow.description}: Please select an SHSH blob file", "YELLOW")
-        return
-
-    # 高亮显示当前工作流所有需要的按钮
-    workflow_buttons = []
-    for step_info in self.workflow.steps.values():
-        if step_info.button_index > 0:  # 跳过没有对应按钮的步骤
-            button = self.button_map.get(step_info.button_index)
-            if button:
-                workflow_buttons.append(button)
-
-                # 如果按钮尚未完成或失败，高亮显示它
-                if button.status != "Completed" and button.status != "Failed":
-                    highlight_next_step_button(button)
-
-    # 找出需要执行的下一个步骤并添加提示
-    self.update_next_step_highlight()  # !/usr/bin/env python3
-
-
 # -*- coding: utf-8 -*-
 
 # gui/main_window.py - Main window implementation
@@ -1349,12 +1295,6 @@ class TurdusGUI(QMainWindow):
             QMessageBox.critical(self, "Error", "No firmware selected. Please select a firmware file first.")
             return
 
-        # For untethered mode, check if SHSH file exists
-        if self.workflow.downgrade_type == DowngradeType.UNTETHERED and not self.shsh_path:
-            QMessageBox.critical(self, "Error",
-                                 "No SHSH blob selected. Please select an SHSH blob file for untethered downgrade.")
-            return
-
         # Check if there's already a command running
         if self.command_thread and self.command_thread.isRunning():
             QMessageBox.warning(self, "Operation in Progress",
@@ -1380,26 +1320,7 @@ class TurdusGUI(QMainWindow):
             self.update_next_step_highlight()
             return
 
-        # Execute different commands based on workflow
-        if self.workflow.downgrade_type == DowngradeType.UNTETHERED:
-            # Input generator
-            generator, ok = QInputDialog.getText(
-                self, "Generator Input",
-                "Enter the generator value from your SHSH blob:",
-                QLineEdit.EchoMode.Normal
-            )
-
-            if not ok or not generator:
-                update_button_status(self.btn_enter_pwnedDFU, "Canceled", COLOR_GREY)
-                self.current_operation_button = None
-                self.update_next_step_highlight()
-                return
-
-            self.generator = generator
-            cmd = f"{TURDUSRA1N_PATH} -EDb {generator}"
-            self.log_message(f"Using generator: {generator}", "BLUE")
-        else:
-            cmd = f"{TURDUSRA1N_PATH} -ED"
+        cmd = f"{TURDUSRA1N_PATH} -ED"
 
         self.run_command(
             cmd,
@@ -1669,19 +1590,69 @@ class TurdusGUI(QMainWindow):
     def reenter_pwned_dfu_for_restore(self):
         """Re-enter pwned DFU mode for device restoration"""
         # Check if there's already a command running
+        """Enter pwned DFU mode"""
+        if not self.firmware_path:
+            QMessageBox.critical(self, "Error", "No firmware selected. Please select a firmware file first.")
+            return
+
+        # For untethered mode, check if SHSH file exists
+        if self.workflow.downgrade_type == DowngradeType.UNTETHERED and not self.shsh_path:
+            QMessageBox.critical(self, "Error",
+                                 "No SHSH blob selected. Please select an SHSH blob file for untethered downgrade.")
+            return
+
+        # Check if there's already a command running
         if self.command_thread and self.command_thread.isRunning():
             QMessageBox.warning(self, "Operation in Progress",
                                 "Another operation is currently running. Please wait for it to complete.")
             return
 
-        # Make sure this step is relevant for the current workflow
-        if WorkflowStep.REENTER_DFU_FOR_RESTORE not in self.workflow.steps:
-            QMessageBox.information(self, "Not Needed",
-                                    f"This step is not needed for {self.workflow.description}.")
+        self.current_operation_button = self.btn_enter_pwnedDFU
+        self.current_step = WorkflowStep.ENTER_PWNED_DFU
+        update_button_status(self.btn_enter_pwnedDFU, "In Progress", COLOR_BLUE)
+        self.log_message("\n===== Entering pwned DFU mode =====", "BLUE")
+
+        # Manual mode, show confirmation dialog
+        result = QMessageBox.question(
+            self, "Enter DFU Mode",
+            "Please make sure your device is connected and in DFU mode.\n\nReady to continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+
+        if result != QMessageBox.StandardButton.Yes:
+            update_button_status(self.btn_enter_pwnedDFU, "Canceled", COLOR_GREY)
+            self.current_operation_button = None
+            self.update_next_step_highlight()
             return
 
+        # Execute different commands based on workflow
+        if self.workflow.downgrade_type == DowngradeType.UNTETHERED:
+            # Input generator
+            generator, ok = QInputDialog.getText(
+                self, "Generator Input",
+                "Enter the generator value from your SHSH blob:",
+                QLineEdit.EchoMode.Normal
+            )
+
+            if not ok or not generator:
+                update_button_status(self.btn_enter_pwnedDFU, "Canceled", COLOR_GREY)
+                self.current_operation_button = None
+                self.update_next_step_highlight()
+                return
+
+            self.generator = generator
+            cmd = f"{TURDUSRA1N_PATH} -EDb {generator}"
+            self.log_message(f"Using generator: {generator}", "BLUE")
+        else:
+            cmd = f"{TURDUSRA1N_PATH} -ED"
+
+        self.run_command(
+            cmd,
+            callback=self._after_enter_pwned_dfu
+        )
+
         self.current_step = WorkflowStep.REENTER_DFU_FOR_RESTORE
-        self.prompt_for_dfu_reentry_restore()
 
     def prompt_for_dfu_reentry_restore(self):
         """Prompt user to re-enter DFU mode for restoration"""
@@ -1918,3 +1889,57 @@ class TurdusGUI(QMainWindow):
         self.log_message("\n====== Process completed! ======", "GREEN")
         self.log_message("Your device should now be running the restored iOS version", "GREEN")
         self.current_operation_button = None
+
+
+def update_workflow_buttons(self):
+    """更新当前工作流程中所有按钮的显示和高亮状态"""
+    # 先重置所有按钮为基本样式
+    for button_index, button in self.button_map.items():
+        if button.status != "Completed" and button.status != "Failed":
+            button.setStyleSheet("""
+                    QPushButton {
+                        font-weight: bold;
+                        padding: 6px 10px;
+                        border-radius: 3px;
+                        background-color: #3D3D3D;
+                        color: #E0E0E0;
+                        border: 1px solid #505050;
+                        text-align: left;
+                    }
+                    QPushButton:hover {
+                        background-color: #4D4D4D;
+                    }
+                    QPushButton:pressed {
+                        background-color: #606060;
+                    }
+                    QPushButton:disabled {
+                        background-color: #353535;
+                        color: #707070;
+                        border: 1px solid #404040;
+                    }
+                """)
+
+    # 如果没有选择固件，提示用户并返回
+    if not self.firmware_path:
+        self.log_message("Please select a firmware file first", "YELLOW")
+        return
+
+    # 如果是非绑定降级但没有SHSH，提示用户并返回
+    if self.workflow.downgrade_type == DowngradeType.UNTETHERED and not self.shsh_path:
+        self.log_message(f"{self.workflow.description}: Please select an SHSH blob file", "YELLOW")
+        return
+
+    # 高亮显示当前工作流所有需要的按钮
+    workflow_buttons = []
+    for step_info in self.workflow.steps.values():
+        if step_info.button_index > 0:  # 跳过没有对应按钮的步骤
+            button = self.button_map.get(step_info.button_index)
+            if button:
+                workflow_buttons.append(button)
+
+                # 如果按钮尚未完成或失败，高亮显示它
+                if button.status != "Completed" and button.status != "Failed":
+                    highlight_next_step_button(button)
+
+    # 找出需要执行的下一个步骤并添加提示
+    self.update_next_step_highlight()  # !/usr/bin/env python3
